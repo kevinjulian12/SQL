@@ -1,0 +1,1903 @@
+﻿use GD2015C1;
+
+/*
+1. Hacer una función que dado un artículo y un deposito devuelva un string que
+indique el estado del depósito según el artículo. Si la cantidad almacenada es
+menor al límite retornar “OCUPACION DEL DEPOSITO XX %” siendo XX el
+% de ocupación. Si la cantidad almacenada es mayor o igual al límite retornar
+“DEPOSITO COMPLETO”.
+*/
+
+create function ej_1​ (@articulo char(8), @deposito char(2)) ​
+returns char(60)​
+
+begin​
+	
+	return (select case when s.stoc_cantidad < s.stoc_stock_maximo 
+				   then 'OCUPACION DEL DEPOSITO: ' + concat(s.stoc_deposito,' es del: ',s.stoc_cantidad * 100 / s.stoc_stock_maximo,' %')
+				   else 'DEPOSITO COMPLETO' end
+			from Producto p 
+			join Stock s on s.stoc_producto = p.prod_codigo
+			where p.prod_codigo = @articulo and s.stoc_deposito = @deposito)
+
+end
+
+/*
+2. Realizar una función que dado un artículo y una fecha, retorne el stock que
+existía a esa fecha
+*/
+
+create function ej_2 (@articulo char(8), @fecha smalldatetime) 
+returns int
+
+begin
+	return (select isnull(sum(stoc_cantidad),0) 
+			from dbo.Stock 
+			where stoc_producto = @articulo) + (select isnull(sum(item_cantidad),0) 
+												from dbo.Item_Factura
+												join dbo.Factura f on f.fact_numero = item_numero and f.fact_sucursal = item_sucursal and f.fact_tipo = item_tipo
+												where item_producto = @articulo and @fecha < f.fact_fecha)
+end
+
+/*
+3. Cree el/los objetos de base de datos necesarios para corregir la tabla empleado
+en caso que sea necesario. Se sabe que debería existir un único gerente general
+(debería ser el único empleado sin jefe). Si detecta que hay más de un empleado
+sin jefe deberá elegir entre ellos el gerente general, el cual será seleccionado por
+mayor salario. Si hay más de uno se seleccionara el de mayor antigüedad en la
+empresa. Al finalizar la ejecución del objeto la tabla deberá cumplir con la regla
+de un único empleado sin jefe (el gerente general) y deberá retornar la cantidad
+de empleados que había sin jefe antes de la ejecución.
+*/
+
+create procedure ej_3 (@empleados_sin_jefes int output)
+as
+	declare @gerente_gral numeric(6,0);
+	set @empleados_sin_jefes = (select count(*) from Empleado where empl_jefe is null);
+
+	if (@empleados_sin_jefes > 1)
+	begin
+		set @gerente_gral = (select top 1 empl_codigo
+							 from Empleado
+							 where empl_jefe is null
+							 order by empl_salario desc, empl_ingreso);
+
+		update Empleado
+		set empl_jefe = @gerente_gral
+		where empl_jefe is null and empl_codigo <> @gerente_gral;
+
+	end
+go
+
+/*
+4. Cree el/los objetos de base de datos necesarios para actualizar la columna de
+empleado empl_comision con la sumatoria del total de lo vendido por ese
+empleado a lo largo del último año. Se deberá retornar el código del vendedor
+que más vendió (en monto) a lo largo del último año.
+*/
+
+create procedure ej_4 (@mejor_vendedor numeric(6,0) output)
+as
+	declare @empl_codigo numeric(6,0)
+	declare @empl_comision decimal(12,2)
+	declare @mayor_comision decimal(12,2)
+	declare empleado_cursor cursor for​ select empl_codigo
+									   from Empleado
+
+	set @mayor_comision = 0
+	open empleado_cursor​
+	fetch next from empleado_cursor into @empl_codigo
+
+	while @@fetch_status = 0​
+	begin
+		
+		set @empl_comision = (select sum(fact_total)
+							  from Factura
+							  --where year(fact_fecha) = year(getdate()) ultimo año 2020, pero como va a dar 0 le pongo 2012
+							  where year(fact_fecha) = 2012 and fact_vendedor = @empl_codigo);
+
+		update Empleado
+		set empl_comision = @empl_comision
+		where empl_codigo = @empl_codigo;
+
+		if (@empl_comision > @mayor_comision)
+		begin
+			
+			set @mayor_comision = @empl_comision
+			set @mejor_vendedor = @empl_codigo
+
+		end
+
+		fetch next from empleado_cursor​ into @empl_codigo
+
+	end
+
+	close empleado_cursor​
+	deallocate empleado_cursor
+go
+
+/*
+5. Realizar un procedimiento que complete con los datos existentes en el modelo
+provisto la tabla de hechos denominada Fact_table tiene las siguiente definición:
+
+Create table Fact_table( 
+	anio char(4) not null,
+	mes char(2) not null,
+	familia char(3) not null,
+	rubro char(4) not null,
+	zona char(3) not null,
+	cliente char(6) not null,
+	producto char(8) not null,
+	cantidad decimal(12,2),
+	monto decimal(12,2)
+);
+
+Alter table Fact_table Add constraint Fact_table_PK primary key(anio,mes,familia,rubro,zona,cliente,producto);
+*/
+
+create procedure ej_5
+as
+	insert into dbo.Fact_table
+	select year(f.fact_fecha), month(f.fact_fecha), p.prod_familia, p.prod_rubro, d.depa_zona, f.fact_cliente, p.prod_codigo, sum(i.item_cantidad), sum(i.item_precio * i.item_cantidad)
+	from factura f
+	join Item_Factura i on i.item_tipo + i.item_sucursal + i.item_numero = f.fact_tipo + f.fact_sucursal + f.fact_numero
+	join Producto p on p.prod_codigo = i.item_producto
+	join empleado e on e.empl_codigo = f.fact_vendedor
+	join departamento d on d.depa_codigo = e.empl_departamento
+	group by year(f.fact_fecha), month(f.fact_fecha), p.prod_familia, p.prod_rubro, d.depa_zona, f.fact_cliente, p.prod_codigo
+go
+
+/*
+6. Realizar un procedimiento que si en alguna factura se facturaron componentes
+que conforman un combo determinado (o sea que juntos componen otro
+producto de mayor nivel), en cuyo caso deberá reemplazar las filas 
+correspondientes a dichos productos por una sola fila con el producto que
+componen con la cantidad de dicho producto que corresponda.
+*/
+
+--Lo que hizo el profe
+alter PROCEDURE SP_UNIFICAR_PRODUCTO
+AS
+BEGIN
+	declare @combo char(8);
+	declare @combocantidad integer;
+	
+	declare @fact_tipo char(1);
+	declare @fact_suc char(4);
+	declare @fact_nro char(8);
+	
+	
+	
+	declare  cFacturas cursor for --CURSOR PARA RECORRER LAS FACTURAS
+		select fact_tipo, fact_sucursal, fact_numero
+		from Factura ;
+		/* where para hacer una prueba acotada
+		where fact_tipo = 'A' and
+				fact_sucursal = '0003' and
+				fact_numero='00092476'; */
+		
+		open cFacturas
+		
+		fetch next from cFacturas
+		into @fact_tipo, @fact_suc, @fact_nro
+		
+		while @@FETCH_STATUS = 0
+		begin	
+			declare  cProducto cursor for
+			select comp_producto --ACA NECESITAMOS UN CURSOR PORQUE PUEDE HABER MAS DE UN COMBO EN UNA FACTURA
+			from Item_Factura join Composicion C1 on (item_producto = C1.comp_componente)
+			where item_cantidad >= C1.comp_cantidad and
+				  item_sucursal = @fact_suc and
+				  item_numero = @fact_nro and
+				  item_tipo = @fact_tipo
+			group by C1.comp_producto
+			having COUNT(*) = (select COUNT(*) from Composicion as C2 where C2.comp_producto= C1.comp_producto)
+			
+			open cProducto
+			fetch next from cProducto into @combo
+			while @@FETCH_STATUS = 0 
+			begin
+	  					
+				select @combocantidad= MIN(FLOOR((item_cantidad/c1.comp_cantidad)))
+				from Item_Factura join Composicion C1 on (item_producto = C1.comp_componente)
+				where item_cantidad >= C1.comp_cantidad and
+					  item_sucursal = @fact_suc and
+					  item_numero = @fact_nro and
+					  item_tipo = @fact_tipo and
+					  c1.comp_producto = @combo	--SACAMOS CUANTOS COMBOS PUEDO ARMAR COMO MÁXIMO (POR ESO EL MIN)
+				
+				--INSERTAMOS LA FILA DEL COMBO CON EL PRECIO QUE CORRESPONDE
+				insert into Item_Factura (item_tipo, item_sucursal, item_numero, item_producto, item_cantidad, item_precio)
+				select @fact_tipo, @fact_suc, @fact_nro, @combo, @combocantidad, (@combocantidad * (select prod_precio from Producto where prod_codigo = @combo));				
+
+				update Item_Factura  
+				set 
+				item_cantidad = i1.item_cantidad - (@combocantidad * (select comp_cantidad from Composicion
+																		where i1.item_producto = comp_componente 
+																			  and comp_producto=@combo)),
+				ITEM_PRECIO = (i1.item_cantidad - (@combocantidad * (select comp_cantidad from Composicion
+															where i1.item_producto = comp_componente 
+																  and comp_producto=@combo))) * 	
+													(select prod_precio from Producto where prod_codigo = I1.item_producto)											  															  
+				from Item_Factura I1, Composicion C1 
+				where I1.item_sucursal = @fact_suc and
+					  I1.item_numero = @fact_nro and
+					  I1.item_tipo = @fact_tipo AND
+					  I1.item_producto = C1.comp_componente AND
+					  C1.comp_producto = @combo
+					  
+				delete from Item_Factura
+				where item_sucursal = @fact_suc and
+					  item_numero = @fact_nro and
+					  item_tipo = @fact_tipo and
+					  item_cantidad = 0
+				
+				fetch next from cproducto into @combo
+			end
+			close cProducto;
+			deallocate cProducto;
+			
+			fetch next from cFacturas into @fact_tipo, @fact_suc, @fact_nro
+			end
+			close cFacturas;
+			deallocate cFacturas;
+	end 
+
+/*
+7. Hacer un procedimiento que dadas dos fechas complete la tabla Ventas. Debe
+insertar una línea por cada artículo con los movimientos de stock generados por
+las ventas entre esas fechas. La tabla se encuentra creada y vacía.
+*/
+
+create table VENTAS (
+	codigo char(8),
+	detalle char(50),
+	cant_mov numeric,
+	precio_de_venta decimal(12,2),
+	renglon numeric,
+	ganancia decimal(12,2)
+);
+
+create procedure ej_7 (@fecha_inicio smalldatetime, @fecha_fin smalldatetime)
+as
+
+	insert into VENTAS
+	select prod_codigo, 
+		   prod_detalle, 
+		   sum(item_cantidad), 
+		   sum(item_precio) / sum(item_cantidad), 
+		   row_number() over (order by (select NULL)), 
+		   (sum(item_precio) / sum(item_cantidad)) - (sum(item_cantidad) * prod_precio)
+	from Producto p
+	join Item_factura on item_producto = prod_codigo
+	join Factura on fact_tipo + fact_sucursal + fact_numero = item_tipo + item_sucursal + item_numero
+	where fact_fecha >= @fecha_inicio and fact_fecha <= @fecha_fin
+	group by prod_codigo, prod_detalle, prod_precio;
+
+go
+
+/*
+8. Realizar un procedimiento que complete la tabla Diferencias de precios, para los
+productos facturados que tengan composición y en los cuales el precio de
+facturación sea diferente al precio del cálculo de los precios unitarios por
+cantidad de sus componentes, se aclara que un producto que compone a otro,
+también puede estar compuesto por otros y así sucesivamente, la tabla se debe
+crear y está formada por las siguientes columnas:
+*/
+
+/*CALCULO RECURSIVO DE PRECIO DE UN COMBO: FUNCIÓN*/
+create function precio_func(@producto char(8))
+returns decimal(12,2)
+
+begin
+	declare @comp_componente char(8)
+	declare @comp_cantidad int
+	declare @precio decimal(12,2)
+	declare componenteCursor cursor for select c.comp_componente, c.comp_cantidad
+										from Composicion c
+										where c.comp_producto = @producto;
+
+	open componenteCursor
+	fetch next from componenteCursor into @comp_componente, @comp_cantidad
+	
+	if(@precio is null)
+		set @precio = 0
+
+	while @@fetch_status = 0​
+	begin
+
+		set @precio = @precio + @comp_cantidad * dbo.precio_func(@comp_componente);
+		fetch next from componenteCursor into @comp_componente, @comp_cantidad
+
+	end
+	
+	close componenteCursor​
+	deallocate componenteCursor
+
+	if(@comp_componente is null)
+	begin
+		set @precio = (select p.prod_precio 
+					   from Producto p 
+					   where p.prod_codigo = @producto);
+	end
+
+	return @precio;
+
+end
+
+--select dbo.precio_func('00006402')
+
+create table DIFERENCIAS (
+	codigo char(8),
+	detalle char(50),
+	cantidad numeric,
+	precio_generado decimal(12,2), /*NOSE A QUE PRECIO SE REFIERE*/
+	precio_facturado decimal(12,2)
+);
+
+create procedure ej_8 as
+begin
+
+	insert into DIFERENCIAS
+	select p.prod_codigo, p.prod_detalle, sum(i.item_cantidad), dbo.precio_func(p.prod_codigo), p.prod_precio
+	from composicion c
+	join Producto p on p.prod_codigo = c.comp_producto
+	join Item_Factura i on i.item_producto = p.prod_codigo
+	where p.prod_precio <> dbo.precio_func(p.prod_codigo) --ACA COMPARO CON EL PRECIO DEL PRODUCTO. TENDRIA MAS SENTIDO SI COMPARO POR EL PRECIO DE FACTURA (ITEM_PRECIO)
+	group by p.prod_codigo, p.prod_detalle, p.prod_precio
+
+end
+
+/*CALCULO RECURSIVO DE PRECIO DE UN COMBO: STORED PROCEDURE --NO ME ESTARÍA SALIENDO COÑO
+create procedure precio_sp(@producto char(8), @precioAcum decimal(12,2) output) as
+begin
+	declare @comp_componente char(8)
+	declare @comp_cantidad int
+	declare hola cursor for select c.comp_componente, c.comp_cantidad
+										 from Composicion c
+										 where c.comp_producto = @producto;
+
+	open hola
+	fetch next from hola into @comp_componente, @comp_cantidad
+
+	while @@fetch_status = 0​
+	begin
+		
+		exec dbo.precio_sp @comp_componente, @precioAcum output
+		set @precioAcum = @precioAcum + @comp_cantidad * @precioAcum
+		fetch next from hola into @comp_componente, @comp_cantidad
+
+	end
+	
+	close hola
+	deallocate hola
+
+	if(@comp_componente is null)
+	begin
+		set @precioAcum = (select p.prod_precio 
+					       from Producto p 
+					       where p.prod_codigo = @producto);
+	end
+
+end
+
+declare @precio decimal(12,2);
+exec dbo.precio_sp '00006402', @precio
+print @precio*/
+
+/*
+9. Crear el/los objetos de base de datos que ante alguna modificación de un ítem de
+factura de un artículo con composición realice el movimiento de sus
+correspondientes componentes.
+*/
+
+--Devuelve depósito que dada una cantidad de productos a agregar, retorne el depósito
+--que más margen de diferencia (porcentual) tenga respecto de su stock_maximo
+create function menorDeposito (@producto char(8), @cantidad decimal(12,2))
+returns char(2)
+
+begin
+
+	declare @stoc_producto char(8)
+	declare @stoc_deposito char(2)
+	declare @stoc_cantidad decimal(12,2)
+	declare @stoc_stock_maximo decimal(12,2)
+	
+	declare @minimo_porcentaje decimal(12,2)
+	declare @deposito char(2)
+	
+	declare stockCursor cursor for select s.stoc_producto, s.stoc_deposito, s.stoc_cantidad, s.stoc_stock_maximo
+								   from Stock s
+							       where s.stoc_producto = @producto
+	
+	set @minimo_porcentaje = 100
+	open stockCursor
+	fetch next from stockCursor into @stoc_producto, @stoc_deposito, @stoc_cantidad, @stoc_stock_maximo
+
+	while @@FETCH_STATUS = 0
+	begin
+
+		if(@stoc_cantidad + @cantidad <= @stoc_stock_maximo)
+		begin
+			if(@minimo_porcentaje >= (@stoc_cantidad + @cantidad) * 100 / @stoc_stock_maximo)
+			begin
+				set @minimo_porcentaje = (@stoc_cantidad + @cantidad) * 100 / @stoc_stock_maximo
+				set @deposito = @stoc_deposito
+			end
+		end
+
+		fetch next from stockCursor into @stoc_producto, @stoc_deposito, @stoc_cantidad, @stoc_stock_maximo
+
+	end
+
+	close stockCursor
+	deallocate stockCursor
+	return @deposito
+
+end
+
+--Devuelve depósito que dada una cantidad de productos a quitar, retorne el depósito
+--que menos margen de diferencia (porcentual) tenga respecto de su stock_maximo
+create function mayorDeposito (@producto char(8), @cantidad decimal(12,2))
+returns char(2)
+
+begin
+
+	declare @stoc_producto char(8)
+	declare @stoc_deposito char(2)
+	declare @stoc_cantidad decimal(12,2)
+	declare @stoc_punto_reposicion decimal(12,2)
+	
+	declare @maximo_porcentaje decimal(12,2)
+	declare @deposito char(2)
+	
+	declare stockCursor cursor for select s.stoc_producto, s.stoc_deposito, s.stoc_cantidad, s.stoc_punto_reposicion
+								   from Stock s
+								   where s.stoc_producto = @producto
+	
+	set @maximo_porcentaje = -100
+	open stockCursor
+	fetch next from stockCursor into @stoc_producto, @stoc_deposito, @stoc_cantidad, @stoc_punto_reposicion
+
+	while @@FETCH_STATUS = 0
+	begin
+
+		/*Esto comento porque en todos los depositos hay poco margen para actualizar stock, entonces ignoro punto_reposicion*/
+		--if(@stoc_cantidad - @cantidad > @stoc_punto_reposicion)
+		--begin
+			if(@maximo_porcentaje <= (@stoc_cantidad - @cantidad) * 100 / @stoc_punto_reposicion)
+			begin
+				set @maximo_porcentaje = (@stoc_cantidad - @cantidad) * 100 / @stoc_punto_reposicion
+				set @deposito = @stoc_deposito
+			end
+		--end
+
+		fetch next from stockCursor into @stoc_producto, @stoc_deposito, @stoc_cantidad, @stoc_punto_reposicion
+
+	end
+
+	close stockCursor
+	deallocate stockCursor
+	return @deposito
+
+end
+
+create procedure reponerComponentes (@producto char(8), @cantidad int) as
+begin
+
+	declare @comp_componente char(8)
+	declare @comp_cantidad int
+	declare componenteCursor cursor for select c.comp_componente, c.comp_cantidad
+										from Composicion c
+										where c.comp_producto = @producto;
+
+	open componenteCursor
+	fetch next from componenteCursor into @comp_componente, @comp_cantidad
+	
+	while @@fetch_status = 0​
+	begin
+
+		exec dbo.reponerComponentes @comp_componente, @comp_cantidad;
+		fetch next from componenteCursor into @comp_componente, @comp_cantidad
+
+	end
+	
+	close componenteCursor​
+	deallocate componenteCursor
+
+	if(@comp_componente is null)
+	begin
+		
+		--repongo stock (en el menor deposito) del componente quitado
+		if(dbo.menorDeposito(@producto, @cantidad) is not null)
+		begin
+			update stock
+			set stoc_cantidad = (select stoc_cantidad
+								 from stock
+								 where stoc_producto = @producto and 
+									   stoc_deposito = dbo.menorDeposito(@producto, @cantidad)) + @cantidad
+			
+			where stoc_deposito = dbo.menorDeposito(@producto, @cantidad) and stoc_producto = @producto
+		end
+		else
+		begin
+			
+			raiserror('Error al intentar reponer stock del producto, supera su limite de stock.', 1, 1, @producto)
+			rollback
+			return
+		
+		end
+
+	end
+
+end
+
+
+create procedure actualizarComponentes (@producto char(8), @cantidad int) as
+begin
+
+	declare @comp_componente char(8)
+	declare @comp_cantidad int
+	declare componenteCursor cursor for select c.comp_componente, c.comp_cantidad
+										from Composicion c
+										where c.comp_producto = @producto;
+
+	open componenteCursor
+	fetch next from componenteCursor into @comp_componente, @comp_cantidad
+	
+	while @@fetch_status = 0​
+	begin
+
+		exec dbo.actualizarComponentes @comp_componente, @comp_cantidad;
+		fetch next from componenteCursor into @comp_componente, @comp_cantidad
+
+	end
+	
+	close componenteCursor​
+	deallocate componenteCursor
+
+	if(@comp_componente is null)
+	begin
+		
+		--actualizo stock (en el mayor deposito) del producto insertado
+		if(dbo.mayorDeposito(@producto, @cantidad) is not null)
+		begin
+			update stock
+			set stoc_cantidad = (select stoc_cantidad
+								 from stock
+								 where stoc_producto = @producto and 
+									   stoc_deposito = dbo.mayorDeposito(@producto, @cantidad)) - @cantidad
+			
+			where stoc_deposito = dbo.mayorDeposito(@producto, @cantidad) and stoc_producto = @producto
+		end
+		else
+		begin
+
+			raiserror('Error al intentar actualizar stock del producto, no hay suficiente stock.', 1, 1, @producto)
+			rollback
+			return
+
+		end
+
+	end
+
+end
+
+create trigger ej_9 on Item_Factura instead of update as
+begin
+	
+	declare @tipo_ins char(1)
+	declare @sucursal_ins char(4)
+	declare @numero_ins char(8)
+	declare @producto_ins char(8)
+	declare @cantidad_ins decimal(12,2)
+	declare @precio_ins decimal(12,2)
+
+	declare @tipo_del char(1)
+	declare @sucursal_del char(4)
+	declare @numero_del char(8)
+	declare @producto_del char(8)
+	declare @cantidad_del decimal(12,2)
+	declare @precio_del decimal(12,2)
+
+	declare @stoc_cantidad decimal(12,2)
+	declare @stoc_deposito char(2)
+
+	begin try
+
+		/*FIJARSE QUE NO FUNCIONA SI A LA TRANSACCION LE PONGO UN ALIAS!!!!!!!!!!!*/
+		begin transaction 
+
+			declare deletedCursor cursor for select *
+											 from deleted
+
+			declare insertedCursor cursor for select *
+											  from inserted;
+
+			open insertedCursor
+			open deletedCursor
+			fetch next from insertedCursor into @tipo_ins, @sucursal_ins, @numero_ins, @producto_ins, @cantidad_ins, @precio_ins
+			fetch next from deletedCursor into @tipo_del, @sucursal_del, @numero_del, @producto_del, @cantidad_del, @precio_del
+
+			while (@@FETCH_STATUS = 0)
+			begin
+
+				--En caso de que actualice la referencia de una factura a otra
+				if(@tipo_ins + @sucursal_ins + @numero_ins != @tipo_del + @sucursal_del + @numero_del)
+				begin
+					
+					--Acá resto del total y del total_impuestos de la factura anterior, lo que saqué
+					update Factura
+					set fact_total = (select fact_total
+									  from Factura
+									  where fact_tipo + fact_sucursal + fact_numero = @tipo_del + @sucursal_del + @numero_del) - (@cantidad_del * @precio_del),
+						
+						fact_total_impuestos = (select fact_total_impuestos
+												from Factura
+												where fact_tipo + fact_sucursal + fact_numero = @tipo_del + @sucursal_del + @numero_del) - (17 * (@cantidad_del * @precio_del) / 100)
+
+					where fact_tipo + fact_sucursal + fact_numero = @tipo_del + @sucursal_del + @numero_del
+
+
+					--Acá sumo del total y del total_impuestos de la factura anterior, lo que agregué
+					update Factura
+					set fact_total = (select fact_total
+									  from Factura
+									  where fact_tipo + fact_sucursal + fact_numero = @tipo_ins + @sucursal_ins + @numero_ins) + (@cantidad_ins * @precio_ins),
+
+						fact_total_impuestos = (select fact_total_impuestos
+												from Factura
+												where fact_tipo + fact_sucursal + fact_numero = @tipo_ins + @sucursal_ins + @numero_ins) + (17 * (@cantidad_del * @precio_del) / 100)
+
+					where fact_tipo + fact_sucursal + fact_numero = @tipo_ins + @sucursal_ins + @numero_ins				
+
+				end
+
+				/*Si el producto que elimino es distinto al que inserto, repongo stock del que quité y resto stock del que inserté
+				respecto de la cantidad, elijiendo depósito con menor cantidad*/
+				if(@producto_ins != @producto_del)
+				begin				
+
+					/*Si ese producto que quité es composición, repongo stock de sus componentes*/
+					if((select comp_producto from Composicion where comp_producto = @producto_del) is not null)
+					begin
+						exec dbo.reponerComponentes @producto_del, @cantidad_del
+					end
+					
+					/*Si no es composicion*/
+					else 
+					begin
+						
+						--repongo stock (en el menor deposito) del producto quitado
+						if(dbo.menorDeposito(@producto_del, @cantidad_del) is not null)
+						begin
+							update stock
+							set stoc_cantidad = (select stoc_cantidad
+												 from stock
+												 where stoc_producto = @producto_del and 
+													   stoc_deposito = dbo.menorDeposito(@producto_del, @cantidad_del)) + @cantidad_del
+							
+							where stoc_deposito = dbo.menorDeposito(@producto_del, @cantidad_del) and stoc_producto = @producto_del
+						end
+						else
+						begin
+							
+							raiserror('Error al intentar reponer stock del producto, supera su limite de stock.', 1, 1, @producto_del)
+							rollback
+							return
+						
+						end
+
+					end
+
+					/*Si ese producto que agrego es composición, actualizo stock de sus componentes*/
+					if((select comp_producto from Composicion where comp_producto = @producto_ins) is not null)
+					begin
+						exec dbo.actualizarComponentes @producto_ins, @cantidad_ins
+					end
+
+					/*Si no es composicion*/
+					else
+					begin
+
+						--actualizo stock (en el mayor deposito) del producto insertado
+						if(dbo.mayorDeposito(@producto_ins, @cantidad_ins) is not null)
+						begin
+							update stock
+							set stoc_cantidad = (select stoc_cantidad
+												 from stock
+												 where stoc_producto = @producto_ins and 
+													   stoc_deposito = dbo.mayorDeposito(@producto_ins, @cantidad_ins)) - @cantidad_ins
+							
+							where stoc_deposito = dbo.mayorDeposito(@producto_ins, @cantidad_ins) and stoc_producto = @producto_ins
+						end
+						else
+						begin
+
+							raiserror('Error al intentar actualizar stock del producto, no hay suficiente stock.', 1, 1, @producto_ins)
+							rollback
+							return
+
+						end	
+
+					end
+
+				end
+
+				/*Si no modifico productos*/
+				else
+				begin
+
+					/*Si la cantidad es modificada*/
+					if(@cantidad_ins != @cantidad_del)
+					begin
+
+						--Actualizo en la factura, su total y su total_impuestos
+						update Factura
+						set fact_total = (select fact_total
+										  from Factura
+										  where fact_tipo + fact_sucursal + fact_numero = @tipo_del + @sucursal_del + @numero_del) + ((@cantidad_ins - @cantidad_del) * @precio_ins),
+							
+							fact_total_impuestos = (select fact_total_impuestos
+													from Factura
+													where fact_tipo + fact_sucursal + fact_numero = @tipo_del + @sucursal_del + @numero_del) + (17 * ((@cantidad_ins - @cantidad_del) * @precio_ins) / 100)
+
+						where fact_tipo + fact_sucursal + fact_numero = @tipo_del + @sucursal_del + @numero_del
+
+						--Actualizo el stock
+						if(@cantidad_ins >= @cantidad_del)
+						begin
+
+							if((select comp_producto from Composicion where comp_producto = @producto_ins) is not null)
+							begin
+								exec dbo.actualizarComponentes @producto_ins, @cantidad_ins --- @cantidad_del
+							end
+
+							else
+							begin
+
+								--actualizo stock (en el mayor deposito) del producto insertado
+								if(dbo.mayorDeposito(@producto_ins, @cantidad_ins) is not null)
+								begin
+									update stock
+									set stoc_cantidad = (select stoc_cantidad
+														 from stock
+														 where stoc_producto = @producto_ins and 
+															   stoc_deposito = dbo.mayorDeposito(@producto_ins, @cantidad_ins)) - @cantidad_ins
+									
+									where stoc_deposito = dbo.mayorDeposito(@producto_ins, @cantidad_ins) and stoc_producto = @producto_ins
+								end
+								else
+								begin
+
+									raiserror('Error al intentar actualizar stock del producto, no hay suficiente stock.', 1, 1, @producto_ins)
+									rollback
+									return
+
+								end	
+
+							end
+
+						end
+						else
+						begin
+
+							if((select comp_producto from Composicion where comp_producto = @producto_ins) is not null)
+							begin
+								exec dbo.reponerComponentes @producto_ins, @cantidad_del --- @cantidad_ins
+							end
+							else
+							begin
+								--repongo stock (en el menor deposito) de la cantidad quitada
+								if(dbo.menorDeposito(@producto_del, @cantidad_del) is not null)
+								begin
+									update stock
+									set stoc_cantidad = (select stoc_cantidad
+														 from stock
+														 where stoc_producto = @producto_del and 
+															   stoc_deposito = dbo.menorDeposito(@producto_del, @cantidad_del - @cantidad_ins)) + (@cantidad_del - @cantidad_ins)
+									
+									where stoc_deposito = dbo.menorDeposito(@producto_del, @cantidad_del - @cantidad_ins) and stoc_producto = @producto_del
+								end
+								else
+								begin
+									
+									raiserror('Error al intentar reponer stock del producto, supera su limite de stock.', 1, 1, @producto_del)
+									rollback
+									return
+								
+								end
+
+							end
+
+						end
+
+					end
+
+				end
+
+				update Item_Factura
+				set item_tipo = @tipo_ins,
+				    item_sucursal = @sucursal_ins,
+				    item_numero = @numero_ins,
+				    item_producto = @producto_ins,
+				    item_cantidad = @cantidad_ins,
+				    item_precio = @precio_ins
+
+				where item_tipo = @tipo_del and
+				      item_sucursal = @sucursal_del and
+				      item_numero = @numero_del and
+				      item_producto = @producto_del and
+				      item_cantidad = @cantidad_del and
+				      item_precio = @precio_del
+
+				fetch next from insertedCursor into @tipo_ins, @sucursal_ins, @numero_ins, @producto_ins, @cantidad_ins, @precio_ins
+				fetch next from deletedCursor into @tipo_del, @sucursal_del, @numero_del, @producto_del, @cantidad_del, @precio_del
+
+			end		
+
+			close insertedCursor
+			close deletedCursor
+
+			deallocate insertedCursor
+			deallocate deletedCursor
+
+		commit
+
+	end try
+	begin catch
+		
+		if @@trancount > 0
+			rollback	
+
+		print 'ERROR AL EJECUTAR TRIGGER ej_9'
+
+	end catch
+
+end
+
+select *
+from Factura
+where fact_tipo + fact_sucursal + fact_numero = 'PPRUEPRUEBA'
+   or fact_tipo + fact_sucursal + fact_numero = 'PPRUEPRUEBA2'
+
+select *
+from Item_Factura
+where item_tipo + item_sucursal + item_numero = 'PPRUEPRUEBA'
+   or item_tipo + item_sucursal + item_numero = 'PPRUEPRUEBA2'
+
+update Item_factura
+set item_cantidad = 4--, item_producto = '00001414'
+where item_numero = 'PRUEBA' and item_producto in ('00001415') 
+
+select *
+from stock
+where stoc_producto in ('00001415')
+	and stoc_deposito in (dbo.mayorDeposito('00001415', 3),
+						  dbo.menorDeposito('00001415', 3))
+
+
+select dbo.mayorDeposito('00001415', 3)
+
+select dbo.menorDeposito('00001415', 3)
+
+
+select *
+from stock
+where stoc_producto = '00000303'
+
+
+select *
+from item_factura
+order by item_cantidad desc
+
+
+/*insert into factura values ('P', 'PRUE', 'PRUEBA', '2020-06-18 00:00:00', 4, 90, 15, '01669')
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA', '00001415', 4, 10)
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA', '00001416', 3, 10)
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA', '00001417', 2, 10)
+
+
+insert into factura values ('P', 'PRUE', 'PRUEBA2', '2020-06-18 00:00:00', 4, 180, 30, '01670')
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA2', '00001417', 4, 10)
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA2', '00001418', 3, 10)
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA2', '00001419', 2, 10)
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA2', '00001420', 4, 10)
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA2', '00001421', 3, 10)
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA2', '00001422', 2, 10)
+
+
+
+delete 
+from item_factura
+where item_tipo + item_sucursal + item_numero = 'PPRUEPRUEBA'
+
+delete 
+from factura
+where fact_tipo + fact_sucursal + fact_numero = 'PPRUEPRUEBA'
+
+delete 
+from item_factura
+where item_tipo + item_sucursal + item_numero = 'PPRUEPRUEBA2'
+
+delete 
+from factura
+where fact_tipo + fact_sucursal + fact_numero = 'PPRUEPRUEBA2'
+*/
+
+/*
+10. Crear el/los objetos de base de datos que ante el intento de borrar un artículo
+verifique que no exista stock y si es así lo borre en caso contrario que emita un
+mensaje de error.
+*/
+
+create trigger ej_10 on Producto instead of delete as
+begin
+
+	declare @prod_codigo char(8)
+	declare productoCursor cursor for select prod_codigo
+									  from deleted
+
+	open productoCursor
+	fetch next from productoCursor into @prod_codigo
+
+	while(@@FETCH_STATUS = 0)
+	begin
+		
+		if((select s.stoc_producto
+			from stock s
+			where s.stoc_producto = @prod_codigo
+			group by s.stoc_producto
+			having (select count(distinct s1.stoc_deposito)
+					from Stock s1
+					where s1.stoc_producto = s.stoc_producto and s1.stoc_cantidad <= 0) = count(distinct s.stoc_deposito)) is not null)
+		begin
+
+			/*Borro en cascada
+			delete
+			from Item_Factura
+			where item_producto = @prod_codigo*/
+
+			delete
+			from Stock
+			where stoc_producto = @prod_codigo
+
+			delete
+			from Producto
+			where prod_codigo = @prod_codigo
+
+		end
+		else
+		begin
+
+			print 'Error al intentar borrar el producto: ' + @prod_codigo + ' hay stock en algunos de sus depósitos.'
+
+		end
+
+		fetch next from productoCursor into @prod_codigo
+
+	end
+
+	close productoCursor
+	deallocate productoCursor
+
+end
+
+delete
+from producto
+where prod_codigo in ('00006499', '00010658', '00000806', '00001102')
+
+
+select concat('','A')
+
+
+select *
+from stock
+where stoc_producto in ('00002508',
+						'00002814',
+						'00006499',
+						'00009831',
+						'00010114',
+						'00010658',
+						'00010712')
+
+
+select distinct stoc_producto
+from stock
+where stoc_cantidad <= 0
+
+
+select *
+from stock
+where stoc_producto = '00000173'
+
+/*
+11. Cree el/los objetos de base de datos necesarios para que dado un código de
+empleado se retorne la cantidad de empleados que este tiene a su cargo (directa o
+indirectamente). Solo contar aquellos empleados (directos o indirectos) que
+tengan un código mayor que su jefe directo.
+*/
+
+--Consejo: hacer siempre la condicion base / o de corte de recursión al principio
+
+create function ej_11 (@empleado numeric(6,0))
+returns int
+begin
+
+	declare @empl_codigo numeric(6,0)
+	declare @cantidadSubordinados int
+
+	set @cantidadSubordinados = 0
+
+	if((select count(*)
+		from Empleado
+		where empl_jefe = @empleado and empl_codigo > empl_jefe) = 0)
+	begin
+
+		return @cantidadSubordinados
+
+	end
+
+	set @cantidadSubordinados = (select count(*)
+								 from Empleado
+								 where empl_jefe = @empleado and empl_codigo > empl_jefe)
+
+	declare empleadoCursor cursor for select e.empl_codigo
+									  from Empleado e
+									  where e.empl_jefe = @empleado and e.empl_codigo > e.empl_jefe
+
+	open empleadoCursor
+	fetch next from empleadoCursor into @empl_codigo
+
+	while(@@FETCH_STATUS = 0)
+	begin
+
+		set @cantidadSubordinados = @cantidadSubordinados + dbo.ej_11(@empl_codigo)		
+		fetch next from empleadoCursor into @empl_codigo
+
+	end	
+
+	close empleadoCursor
+	deallocate empleadoCursor
+
+	return @cantidadSubordinados
+
+end
+
+
+--Lo que hizo el profe
+alter function FN_CALCULAR_CANT_EMPLEADOS (@empleado numeric(6,0))
+returns int
+as
+	begin
+		declare @cantidad int
+		declare @emp_jefe numeric(6,0)
+		declare @emp_codigo numeric(6,0)
+				
+		set @cantidad = 0;
+				
+		if NOT EXISTS(SELECT * FROM Empleado WHERE @empleado = empl_jefe)
+		begin
+			RETURN @cantidad
+		end;		
+				
+		set @cantidad = (select count(*) from empleado where empl_jefe=@empleado and empl_codigo>@empleado)
+		
+		declare cEmp cursor for
+		select empl_jefe, empl_codigo
+		from Empleado 
+		where empl_jefe = @empleado
+		
+		open cEmp
+		fetch next from cEmp into @emp_jefe, @emp_codigo
+		while @@FETCH_STATUS = 0
+			begin
+				set @cantidad = @cantidad + dbo.FN_CALCULAR_CANT_EMPLEADOS(@emp_codigo)
+				fetch next from cEmp into @emp_jefe, @emp_codigo
+			end
+		close cEmp;
+		deallocate cEmp;	
+		return @cantidad;	
+	end;
+
+/*
+12. Cree el/los objetos de base de datos necesarios para que nunca un producto
+pueda ser compuesto por sí mismo. Se sabe que en la actualidad dicha regla se
+cumple y que la base de datos es accedida por n aplicaciones de diferentes tipos
+y tecnologías. No se conoce la cantidad de niveles de composición existentes.
+*/
+
+
+
+/*
+13. Cree el/los objetos de base de datos necesarios para implantar la siguiente regla
+“Ningún jefe puede tener un salario mayor al 20% de las suma de los salarios de
+sus empleados totales (directos + indirectos)”. Se sabe que en la actualidad dicha
+regla se cumple y que la base de datos es accedida por n aplicaciones de
+diferentes tipos y tecnologías
+*/
+
+
+
+/*
+14. Agregar el/los objetos necesarios para que si un cliente compra un producto
+compuesto a un precio menor que la suma de los precios de sus componentes
+que imprima la fecha, que cliente, que productos y a qué precio se realizó la
+compra. No se deberá permitir que dicho precio sea menor a la mitad de la suma
+de los componentes.
+*/
+
+
+
+/*
+15. Cree el/los objetos de base de datos necesarios para que el objeto principal
+reciba un producto como parametro y retorne el precio del mismo.
+Se debe prever que el precio de los productos compuestos sera la sumatoria de
+los componentes del mismo multiplicado por sus respectivas cantidades. No se
+conocen los nivles de anidamiento posibles de los productos. Se asegura que
+nunca un producto esta compuesto por si mismo a ningun nivel. El objeto
+principal debe poder ser utilizado como filtro en el where de una sentencia
+select.
+*/
+
+
+
+/*
+16. Desarrolle el/los elementos de base de datos necesarios para que ante una venta
+automaticamante se descuenten del stock los articulos vendidos. Se descontaran
+del deposito que mas producto poseea y se supone que el stock se almacena
+tanto de productos simples como compuestos (si se acaba el stock de los
+compuestos no se arman combos)
+En caso que no alcance el stock de un deposito se descontara del siguiente y asi
+hasta agotar los depositos posibles. En ultima instancia se dejara stock negativo
+en el ultimo deposito que se desconto.
+*/
+
+
+
+/*
+17. Sabiendo que el punto de reposicion del stock es la menor cantidad de ese objeto
+que se debe almacenar en el deposito y que el stock maximo es la maxima
+cantidad de ese producto en ese deposito, cree el/los objetos de base de datos
+necesarios para que dicha regla de negocio se cumpla automaticamente. No se
+conoce la forma de acceso a los datos ni el procedimiento por el cual se
+incrementa o descuenta stock
+*/
+
+
+
+/*
+18. Sabiendo que el limite de credito de un cliente es el monto maximo que se le
+puede facturar mensualmente, cree el/los objetos de base de datos necesarios
+para que dicha regla de negocio se cumpla automaticamente. No se conoce la
+forma de acceso a los datos ni el procedimiento por el cual se emiten las facturas
+*/
+
+
+
+/*
+19. Cree el/los objetos de base de datos necesarios para que se cumpla la siguiente
+regla de negocio automáticamente “Ningún jefe puede tener menos de 5 años de
+antigüedad y tampoco puede tener más del 50% del personal a su cargo
+(contando directos e indirectos) a excepción del gerente general”. Se sabe que en
+la actualidad la regla se cumple y existe un único gerente general.
+*/
+
+
+
+/*
+20. Crear el/los objeto/s necesarios para mantener actualizadas las comisiones del
+vendedor.
+El cálculo de la comisión está dado por el 5% de la venta total efectuada por ese
+vendedor en ese mes, más un 3% adicional en caso de que ese vendedor haya
+vendido por lo menos 50 productos distintos en el mes.
+*/
+
+
+
+/*
+21. Desarrolle el/los elementos de base de datos necesarios para que se cumpla
+automaticamente la regla de que en una factura no puede contener productos de
+diferentes familias. En caso de que esto ocurra no debe grabarse esa factura y
+debe emitirse un error en pantalla.
+*/
+
+
+
+/*
+22. Se requiere recategorizar los rubros de productos, de forma tal que nigun rubro
+tenga más de 20 productos asignados, si un rubro tiene más de 20 productos
+asignados se deberan distribuir en otros rubros que no tengan mas de 20
+productos y si no entran se debra crear un nuevo rubro en la misma familia con
+la descirpción “RUBRO REASIGNADO”, cree el/los objetos de base de datos
+necesarios para que dicha regla de negocio quede implementada.
+*/
+
+
+
+/*
+23. Desarrolle el/los elementos de base de datos necesarios para que ante una venta
+automaticamante se controle que en una misma factura no puedan venderse más
+de dos productos con composición. Si esto ocurre debera rechazarse la factura.
+*/
+
+
+
+/*
+24. Se requiere recategorizar los encargados asignados a los depositos. Para ello
+cree el o los objetos de bases de datos necesarios que lo resueva, teniendo en
+cuenta que un deposito no puede tener como encargado un empleado que
+pertenezca a un departamento que no sea de la misma zona que el deposito, si
+esto ocurre a dicho deposito debera asignársele el empleado con menos
+depositos asignados que pertenezca a un departamento de esa zona.
+*/
+
+
+
+/*
+25. Desarrolle el/los elementos de base de datos necesarios para que no se permita
+que la composición de los productos sea recursiva, o sea, que si el producto A 
+compone al producto B, dicho producto B no pueda ser compuesto por el
+producto A, hoy la regla se cumple.
+*/
+
+
+
+/*
+26. Desarrolle el/los elementos de base de datos necesarios para que se cumpla
+automaticamente la regla de que una factura no puede contener productos que
+sean componentes de otros productos. En caso de que esto ocurra no debe
+grabarse esa factura y debe emitirse un error en pantalla.
+*/
+
+alter trigger ej_26 on Item_Factura instead of insert as
+begin
+
+	if (select c.comp_componente
+	    from inserted i
+	    join Composicion c on c.comp_componente = i.item_producto
+	    group by c.comp_componente
+	    having count(distinct c.comp_producto) > 1) is null
+
+		insert into Item_Factura select * from inserted
+
+	else
+	begin --DICE NO GRABAR FACTURA, ES DECIR NINGÚN ITEM. TENGO QUE BORRAR LA FACTURA
+		print 'Hay productos que son componentes de diferentes productos'
+	end
+
+end
+
+
+/*
+27. Se requiere reasignar los encargados de stock de los diferentes depósitos. Para
+ello se solicita que realice el o los objetos de base de datos necesarios para
+asignar a cada uno de los depósitos el encargado que le corresponda,
+entendiendo que el encargado que le corresponde es cualquier empleado que no
+es jefe y que no es vendedor, o sea, que no está asignado a ningun cliente, se
+deberán ir asignando tratando de que un empleado solo tenga un deposito
+asignado, en caso de no poder se irán aumentando la cantidad de depósitos
+progresivamente para cada empleado.
+*/
+
+
+
+/*
+28. Se requiere reasignar los vendedores a los clientes. Para ello se solicita que
+realice el o los objetos de base de datos necesarios para asignar a cada uno de los
+clientes el vendedor que le corresponda, entendiendo que el vendedor que le
+corresponde es aquel que le vendió más facturas a ese cliente, si en particular un
+cliente no tiene facturas compradas se le deberá asignar el vendedor con más
+venta de la empresa, o sea, el que en monto haya vendido más.
+*/
+
+
+
+/*
+29. Desarrolle el/los elementos de base de datos necesarios para que se cumpla
+automaticamente la regla de que una factura no puede contener productos que
+sean componentes de diferentes productos. En caso de que esto ocurra no debe
+grabarse esa factura y debe emitirse un error en pantalla.
+*/
+
+alter trigger ej_29 on Item_Factura instead of insert as
+begin
+
+	if (select c.comp_componente
+	    from inserted i
+	    join Composicion c on c.comp_componente = i.item_producto
+	    group by c.comp_componente
+	    having count(distinct c.comp_producto) > 1) is null
+
+		insert into Item_Factura select * from inserted
+
+	else
+		print 'Hay productos que son componentes de diferentes productos'
+
+end
+
+insert into Factura values ('P', 'PRUE', 'PRUEBA', null, null, null, null, null)
+
+insert into Item_Factura values 
+('P', 'PRUE', 'PRUEBA', '00001109', null, null),
+('P', 'PRUE', 'PRUEBA', '00001475', null, null)
+
+select c.comp_componente
+	    from Composicion c 
+		where c.comp_componente in ('00001109','00001123','00001109')
+	    group by c.comp_componente
+	    having count(distinct c.comp_producto) > 1
+
+select * from Composicion
+
+insert into Composicion values (3.00, '00000000', '00001123')
+
+/*
+30. Agregar el/los objetos necesarios para crear una regla por la cual un cliente no
+pueda comprar más de 100 unidades en el mes de ningún producto, si esto
+ocurre no se deberá ingresar la operación y se deberá emitir un mensaje “Se ha
+superado el límite máximo de compra de un producto”. Se sabe que esta regla se
+cumple y que las facturas no pueden ser modificadas.
+*/
+
+create function unidadesCompradasPorCliente (@cliente char(6), @producto char(8))
+returns int as
+begin
+	return (select sum(item_cantidad)
+			from Factura
+			join Item_Factura on fact_tipo + fact_sucursal + fact_numero = item_tipo + item_sucursal + item_numero
+			where fact_cliente = @cliente and item_producto = @producto)
+end
+
+--Supongo factura ya insertada (cabecera), ya que los items referencian a una factura. Recorro items y si cumple la regla, inserto item
+--si no cumple la regla, no lo inserto (al item) e imprimo un msj de error, quedando items insertados e items que no fueron insertados
+create trigger ej_30 on Item_Factura instead of insert as
+begin
+
+	/*PONER TODOS LOS CAMPOS, LO HICE ASI PARA SIMPLIFICAR*/
+	declare @fact_cliente char(6)
+	declare @item_tipo char(1)
+	declare @item_sucursal char(4)
+	declare @item_numero char(8)
+	declare @item_producto char(8)
+	declare @item_cantidad decimal(12,2)
+	declare @cantidad decimal(12,2)
+
+	declare facturaCursor cursor for select i.item_tipo, i.item_sucursal, i.item_numero, f.fact_cliente, i.item_producto, i.item_cantidad
+									 from inserted i
+									 join Factura f on f.fact_tipo + f.fact_sucursal + f.fact_numero = i.item_tipo + i.item_sucursal + i.item_numero
+	
+	open facturaCursor
+	fetch next from facturaCursor into @item_tipo, @item_sucursal, @item_numero, @fact_cliente, @item_producto, @item_cantidad
+
+	while @@FETCH_STATUS = 0
+	begin
+		set @cantidad = dbo.UnidadesCompradasPorCliente(@fact_cliente, @item_producto)
+		if(@cantidad + @item_cantidad >= 10)
+			print 'Limite alcanzado para el cliente ' + @fact_cliente + '. Producto ' + @item_producto + ', cant actual ' + CAST(@cantidad as varchar(10)) + ', cant agregada ' + CAST(@item_cantidad as varchar(10))
+		else
+		begin
+			insert into Item_Factura (item_tipo, item_sucursal, item_numero, item_producto, item_cantidad) values (@item_tipo, @item_sucursal, @item_numero, @item_producto, @item_cantidad)
+		end
+
+		fetch next from facturaCursor into @item_tipo, @item_sucursal, @item_numero, @fact_cliente, @item_producto, @item_cantidad
+	end
+
+end
+
+insert into factura values ('P', 'PRUE', 'PRUEBA', '2020-06-18 00:00:00', 4, 90, 15, '01669')
+
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA', '00010723', 10, 10)
+
+select * from Item_Factura where item_numero = 'PRUEBA'
+
+select * from Factura where fact_numero = 'PRUEBA'
+
+select *
+from Factura
+join Item_Factura on item_tipo + item_sucursal + item_numero = fact_tipo + fact_sucursal + fact_numero
+where fact_cliente = '01669' and item_producto = '00010723'
+order by item_producto desc
+
+select sum(item_cantidad)
+			from Factura
+			join Item_Factura on fact_tipo + fact_sucursal + fact_numero = item_tipo + item_sucursal + item_numero
+			where fact_cliente = '01669' and item_producto = '00010723'
+
+/*
+31. Desarrolle el o los objetos de base de datos necesarios, para que un jefe no pueda
+tener más de 20 empleados a cargo, directa o indirectamente, si esto ocurre
+debera asignarsele un jefe que cumpla esa condición, si no existe un jefe para
+asignarle se le deberá colocar como jefe al gerente general que es aquel que no
+tiene jefe.
+*/
+
+create function cant_subor(@empleado numeric (6,0))
+returns int as 
+begin
+	
+	declare @cant int
+	declare @emp_jefe numeric(6,0)
+	declare @emp_codigo numeric(6,0)
+			
+	set @cant = 0;
+			
+	if not exists(select * from Empleado where @empleado = empl_jefe) and
+	   @empleado = (select top 1 empl_codigo from Empleado where empl_codigo = @empleado and empl_jefe is null)
+	
+	begin
+		return @cant
+	end;		
+			
+	set @cant = (select count(*) from empleado where empl_jefe = @empleado)
+	
+	declare empleadoCursor cursor for select empl_jefe, empl_codigo
+									  from Empleado 
+									  where empl_jefe = @empleado
+	
+	open empleadoCursor
+	fetch next from empleadoCursor into @emp_jefe, @emp_codigo
+	
+	while @@FETCH_STATUS = 0
+	begin
+		set @cant = @cant + dbo.cant_subor(@emp_codigo)
+		fetch next from empleadoCursor into @emp_jefe, @emp_codigo
+	end
+	
+	close empleadoCursor;
+	deallocate empleadoCursor;	
+	return @cant;		
+
+end
+
+
+alter trigger ej_31 on Empleado instead of insert, update as
+begin	
+
+	/*PONER TODOS LOS CAMPOS, LO HICE ASI PARA SIMPLIFICAR*/
+	declare @empl_codigo_ins numeric(6,0)
+	declare @empl_jefe_ins numeric(6,0)
+	declare @empl_codigo_del numeric(6,0)
+	declare @empl_jefe_del numeric(6,0)
+
+	declare @jefeConMenosDe20Sub numeric(6,0)
+	declare @gteGral numeric(6,0)
+
+	declare cursorEmpl cursor for select i.empl_codigo, i.empl_jefe, d.empl_codigo, d.empl_jefe
+								  from inserted i
+								  left join deleted d on d.empl_codigo = i.empl_codigo
+	
+	open cursorEmpl
+	fetch next from cursorEmpl into @empl_codigo_ins, @empl_jefe_ins, @empl_codigo_del, @empl_jefe_del
+
+	while(@@fetch_status = 0)
+	begin
+		
+		if(dbo.cant_subor(@empl_jefe_ins) >= 2)
+		begin
+			set @jefeConMenosDe20Sub = (select top 1 empl_codigo 
+										from Empleado 
+										where dbo.cant_subor(empl_codigo) between 1 and 1)
+			
+			if @jefeConMenosDe20Sub is null
+			begin
+
+				set @gteGral = (select top 1 empl_codigo from Empleado where empl_jefe is null)
+
+				if(@empl_codigo_del is null) --insert
+					insert into Empleado (empl_codigo, empl_jefe) values (@empl_codigo_ins, @gteGral)
+				else --update
+					update Empleado set empl_jefe = @gteGral where empl_codigo = @empl_codigo_del
+
+			end
+			else
+
+				if(@empl_codigo_del is null)--insert
+					insert into Empleado (empl_codigo, empl_jefe) values (@empl_codigo_ins, @jefeConMenosDe20Sub)
+				else --update
+					update Empleado set empl_jefe = @jefeConMenosDe20Sub where empl_codigo = @empl_codigo_del				
+					
+		end
+		else
+			if(@empl_codigo_del is null)--insert
+				insert into Empleado (empl_codigo, empl_jefe) values (@empl_codigo_ins, @empl_jefe_ins)
+			else --update
+				update Empleado set empl_jefe = @empl_jefe_ins where empl_codigo = @empl_codigo_del		
+					
+
+		fetch next from cursorEmpl into @empl_codigo_ins, @empl_jefe_ins, @empl_codigo_del, @empl_jefe_del
+
+	end
+
+	close cursorEmpl
+	deallocate cursorEmpl
+
+end
+
+insert into Factura
+
+/*
+Agregar el/los objetos necesarios para que se controle que ningún producto componente, sea compuesto por otros productos.
+*/
+
+/*VITELLI*/
+create trigger ej2_componente
+on dbo.Composicion
+instead of insert, update
+as
+begin
+	declare @producto char(8), @componente char(8), @cantidad decimal(12,2)
+	declare c1 cursor for select * from inserted
+	open c1
+	fetch next from c1 into @cantidad, @producto, @componente
+	while @@FETCH_STATUS = 0
+		begin
+			if((select COUNT(comp_componente) from Composicion c where c.comp_producto = @componente) = 0 and 
+			(select COUNT(comp_producto) from Composicion c2 where c2.comp_componente = @producto)= 0)
+				begin
+					insert into Composicion values (@cantidad, @producto, @componente)
+				end
+			else
+				begin
+					print 'Un componente no puede estar compuesto por otro producto'
+				end
+		fetch next from c1 into @cantidad, @producto, @componente
+		end
+	close c1
+	deallocate c1
+end
+
+/*
+Punto 2: Implementar el/los objetos necesarios para implementar la siguiente restricción en línea:
+Cuando se inserta en una venta un COMBO, nunca se deberá guardar el producto COMBO, sino, la descomposición de sus componentes.
+NOTA: Se sabe que actualmente todos los artículos guardados de ventas están descompuestos en sus componentes
+*/
+
+--INSTEAD OF triggers do not support direct recursion. The trigger execution failed.!!!
+--PROBAR CON TRIGGER AFTER
+alter trigger parcial_mañana on Item_Factura after insert as
+begin
+
+	declare @item_producto char(8)
+	declare @item_tipo char(1)
+	declare @item_sucursal char(4)
+	declare @item_numero char(8)
+	declare @item_precio decimal(12,2)
+	
+	declare cc1 cursor for select item_producto, item_tipo, item_sucursal, item_numero, item_precio
+						   from inserted;
+
+	open cc1
+	fetch next from cc1 into @item_producto, @item_tipo, @item_sucursal, @item_numero, @item_precio
+
+	while (@@fetch_status = 0)
+	begin
+
+		if (select count(*) from Composicion where comp_producto = @item_producto) > 0
+		begin
+			delete from Item_Factura where item_tipo + item_sucursal + item_numero + item_producto = @item_tipo + @item_sucursal + @item_numero + @item_producto
+			exec dbo.guardarComponentes @item_producto, @item_tipo, @item_sucursal, @item_numero, 1, @item_precio;
+		end
+		else
+			insert into Item_Factura values(@item_tipo, @item_sucursal, @item_numero, @item_producto, 1, @item_precio)
+
+		fetch next from cc1 into @item_producto, @item_tipo, @item_sucursal, @item_numero, @item_precio	
+
+	end
+
+	close cc1 
+	deallocate cc1 
+
+end
+
+select * from composicion
+
+insert into factura values ('P', 'PRUE', 'PRUEBA', '2020-06-18 00:00:00', 4, 90, 15, '01669')
+insert into Item_Factura values ('P', 'PRUE', 'PRUEBA', '00001104', 1, 10)
+
+delete from item_factura where item_tipo = 'P'
+delete from factura where fact_tipo = 'P'
+select * from item_factura where item_tipo = 'P'
+
+alter procedure guardarComponentes (@producto char(8), @item_tipo char(1), @item_sucursal char(4), @item_numero char(8), @item_cantidad decimal(12,2), @item_precio decimal(12,2)) as
+begin
+	
+	if (select count(*) from composicion where comp_producto = @producto) = 0
+	begin
+		insert into Item_Factura values(@item_tipo, @item_sucursal, @item_numero, @producto, @item_cantidad, @item_precio)
+	end
+	
+	else
+	begin
+
+		declare @comp_producto char(8)
+		declare @comp_componente char(8)
+		declare @comp_cantidad decimal(12,2)
+		declare @prod_precio decimal(12,2)
+		
+		declare cc cursor for select comp_componente, comp_producto, comp_cantidad, prod_precio
+							  from Composicion
+							  join Producto on prod_codigo = comp_producto
+							  where comp_producto = @producto
+		
+		open cc
+		fetch next from cc into @comp_componente, @comp_producto, @comp_cantidad, @prod_precio
+		
+		while(@@FETCH_STATUS = 0)
+		begin
+		
+			exec dbo.guardarComponentes @comp_componente, @item_tipo, @item_sucursal, @item_numero, @comp_cantidad, @prod_precio;
+			fetch next from cc into @comp_componente, @comp_producto, @comp_cantidad, @prod_precio
+		
+		end
+		
+		close cc
+		deallocate cc
+
+	end
+
+end
+
+create procedure actualizarComponentes (@producto char(8), @cantidad int) as
+begin
+
+	declare @comp_componente char(8)
+	declare @comp_cantidad int
+	declare componenteCursor cursor for select c.comp_componente, c.comp_cantidad
+										from Composicion c
+										where c.comp_producto = @producto;
+
+	open componenteCursor
+	fetch next from componenteCursor into @comp_componente, @comp_cantidad
+	
+	while @@fetch_status = 0​
+	begin
+
+		exec dbo.actualizarComponentes @comp_componente, @comp_cantidad;
+		fetch next from componenteCursor into @comp_componente, @comp_cantidad
+
+	end
+	
+	close componenteCursor​
+	deallocate componenteCursor
+
+	if(@comp_componente is null)
+	begin
+		
+		--actualizo stock (en el mayor deposito) del producto insertado
+		if(dbo.mayorDeposito(@producto, @cantidad) is not null)
+		begin
+			update stock
+			set stoc_cantidad = (select stoc_cantidad
+								 from stock
+								 where stoc_producto = @producto and 
+									   stoc_deposito = dbo.mayorDeposito(@producto, @cantidad)) - @cantidad
+			
+			where stoc_deposito = dbo.mayorDeposito(@producto, @cantidad) and stoc_producto = @producto
+		end
+		else
+		begin
+
+			raiserror('Error al intentar actualizar stock del producto, no hay suficiente stock.', 1, 1, @producto)
+			rollback
+			return
+
+		end
+
+	end
+
+end
+
+
+
+/*
+Agregar el/los objetos necesarios para que se permita mantener la siguiente restricción:
+Nunca un jefe va a poder tener más de 20 personas a cargo y menos de 1.
+Nota: Considerar solo 1 nivel de la relación empleado-jefe.
+
+
+COMENTARIO: no hace el tratamiento separado paara diferentes eventos, insert, delete, update
+hace un trigger instead of y hace roolback no entiende el concepto
+
+*/
+
+-- Esto fue lo que hice en el parcial, me doy cuenta que esta todo mal. Más abajo descomentado la resolución que hice en estos días
+
+/*create trigger jefe_parcial on Empleado instead of insert, update, delete as
+begin
+
+	declare @empl_codigo_ins numeric(6,0)
+	declare @empl_jefe_ins numeric(6,0)
+	declare @empl_codigo_del numeric(6,0)
+	declare @empl_jefe_del numeric(6,0)
+
+	declare emplCursorIns cursor for select empl_codigo, empl_jefe from inserted
+	declare emplCursorDel cursor for select empl_codigo, empl_jefe from deleted
+	
+	open emplCursorIns
+	open emplCursorDel
+	fetch next from emplCursorIns into @empl_codigo_ins, @empl_jefe_ins
+	fetch next from emplCursorDel into @empl_codigo_del, @empl_jefe_del
+
+	while (@@FETCH_STATUS = 0)
+	begin	
+		
+		if ((select count(distinct sub.empl_codigo)
+		     from Empleado jefe
+		     join Empleado sub on sub.empl_jefe = jefe.empl_codigo
+		     where jefe.empl_codigo = @empl_jefe_ins) >= 20)
+		begin
+			raiserror('NO PUEDE HABER MAS DE 20 EMPLEADOS SUBORDINADOS POR JEFE',1,1)
+			rollback;
+		end
+
+		if ((select count(distinct sub.empl_codigo)
+		     from Empleado jefe
+		     join Empleado sub on sub.empl_jefe = jefe.empl_codigo
+		     where jefe.empl_codigo = @empl_jefe_del) <= 1)
+		begin
+			raiserror('NO PUEDE HABER MENOS DE UN EMPLEADO SUBORDINADO POR JEFE',1,1)
+			rollback;
+		end
+
+		fetch next from emplCursorIns into @empl_codigo_ins, @empl_jefe_ins
+		fetch next from emplCursorDel into @empl_codigo_del, @empl_jefe_del
+
+	end
+
+	close emplCursorIns
+	deallocate emplCursorIns
+	close emplCursorDel
+	deallocate emplCursorDel
+
+end*/
+
+/*COMO DEBERIA HABERLO HECHO*/
+
+create trigger jefe_parcial on Empleado instead of insert, update, delete
+as
+begin
+
+	declare @empl_codigo_ins numeric(6,0)
+	declare @empl_jefe_ins numeric(6,0)
+	declare @empl_codigo_del numeric(6,0)
+	declare @empl_jefe_del numeric(6,0)
+
+	--DUDA: acá uso un full join porque quiero que me traiga registros en TODOS los casos (eventos): insert, update, delete
+	--nosé si hay otra forma. Salvo hacer 3 triggers: uno para insert, otro para delete y otro para update
+	declare emplCursor cursor for select i.empl_codigo, i.empl_jefe, d.empl_codigo, d.empl_jefe
+								  from inserted i
+								  full join deleted d on d.empl_codigo = i.empl_codigo;	
+	
+	open emplCursor
+	fetch next from emplCursor into @empl_codigo_ins, @empl_jefe_ins, @empl_codigo_del, @empl_jefe_del
+
+	while (@@FETCH_STATUS = 0)
+	begin	
+		
+		if(@empl_codigo_del is not null and @empl_codigo_ins is not null) --por si hago update
+		begin
+			
+
+			-- aca simplemente hago una query porque dice "considerar un nivel empleado-jefe", sino usar recursividad con una función
+			if (select count(*) from Empleado where empl_jefe = @empl_jefe_del) <= 1 or 
+			   (select count(*) from Empleado where empl_jefe = @empl_jefe_ins) >= 20
+				print 'Empleado '  + CAST(@empl_codigo_ins as varchar(10)) + ' no actualizado';
+			else
+			-- aca tenes que updetear todas las columnas porque no sabes cual modifico quizas modifica otra y en ese caso no lo haces
+
+				update Empleado 
+				set empl_jefe = @empl_jefe_ins
+				where empl_codigo = @empl_codigo_ins
+	
+		end		
+		
+		else if (@empl_codigo_del is not null) --por si hago delete
+		begin
+
+			if (select count(*) from Empleado where empl_jefe = @empl_jefe_del) <= 1
+				print 'El jefe ' + CAST(@empl_jefe_del as varchar(10)) + ' tiene menos de un empleado. Empleado '  + CAST(@empl_codigo_del as varchar(10)) + ' no borrado';
+			else
+				delete from Empleado where empl_codigo = @empl_codigo_del
+					
+		end
+		
+		else if (@empl_codigo_ins is not null) --por si hago insert
+		begin
+
+			if (select count(*) from Empleado where empl_jefe = @empl_jefe_ins) >= 20
+				print 'Límite excedido para el jefe ' + CAST(@empl_jefe_ins as varchar(10)) + '. Empleado '  + CAST(@empl_codigo_ins as varchar(10)) + ' no insertado';
+			else
+				insert into Empleado (empl_codigo, empl_jefe) values (@empl_codigo_ins, @empl_jefe_ins)	
+							
+		end
+
+		fetch next from emplCursor into @empl_codigo_ins, @empl_jefe_ins, @empl_codigo_del, @empl_jefe_del
+
+	end
+
+	close emplCursor
+	deallocate emplCursor
+
+end
+
+
+/*
+Dada una tabla llamada TOP_Cliente, 
+en la cual esta el cliente que más unidades compro de todos los productos en todos los tiempos 
+se le pide que implemente el/los objetos necesarios para que la misma esté siempre actualizada. 
+La estructura de la tabla es TOP_CLIENTE( ID_CLIENTE, CANTIDAD_TOTAL_COMPRADA) 
+y actualmente tiene datos y cumplen con la condición.
+*/
+
+--Hago un trigger sobre ITEM factura ya que primero se debe insertar
+--una factura y luego sus items (por foreign key)
+--entonces joineo inserted con Factura (que ya está insertada)
+
+--create table TOP_CLIENTE( ID_CLIENTE char(6), CANTIDAD_TOTAL_COMPRADA decimal(12,2))
+alter trigger parcial on Item_Factura after insert as
+begin
+	
+	declare @cantidad decimal(12,2)
+	declare @cliente char(6)
+
+	declare @cantidad_actual decimal(12,2)
+	declare @cliente_actual char(6)
+
+	declare @cantidad_momentanea decimal(12,2)
+
+	set @cliente_actual = (select top 1 ID_CLIENTE from TOP_CLIENTE) --top 1 porque solo hay un registro en esta tabla
+	set @cantidad_actual = (select top 1 CANTIDAD_TOTAL_COMPRADA from TOP_CLIENTE)
+
+	declare factCursor cursor for select f.fact_cliente, sum(i.item_cantidad)
+								  from inserted i
+								  join Factura f on f.fact_tipo + f.fact_sucursal + f.fact_numero = i.item_tipo + i.item_sucursal + i.item_numero
+								  group by f.fact_cliente
+
+	open factCursor
+	fetch next from factCursor into @cliente, @cantidad
+
+	while @@FETCH_STATUS = 0
+	begin
+		set @cantidad_momentanea = @cantidad + (select sum(i.item_cantidad)
+												from Factura f
+												join Item_Factura i on f.fact_tipo + f.fact_sucursal + f.fact_numero = i.item_tipo + i.item_sucursal + i.item_numero
+												where f.fact_cliente = @cliente)
+
+		if(@cantidad_actual < @cantidad_momentanea and @cliente_actual != @cliente)
+		begin
+			delete from TOP_CLIENTE
+			insert into TOP_CLIENTE values (@cliente, @cantidad_momentanea)
+		end
+		else if (@cantidad_actual < @cantidad_momentanea and @cliente_actual = @cliente)
+			update TOP_CLIENTE 
+			set CANTIDAD_TOTAL_COMPRADA = @cantidad_momentanea 
+			where ID_CLIENTE = @cliente
+
+		fetch next from factCursor into @cliente, @cantidad
+
+	end
+
+	close factCursor
+	deallocate factCursor
+
+end
+
+
+--NO LLEGUÉ A PROBARLO
+/*insert into TOP_CLIENTE values ('00000 ', 20)
+
+select  * from TOP_CLIENTE
+
+delete from Factura where fact_tipo + fact_sucursal + fact_numero in ('PPRUEPRUEBA3', 'PPRUEPRUEBA4')
+
+insert into Factura values ('P', 'PRUE', 'PRUEBA4', null, null, null, null, '00000')
+insert into Factura values ('P', 'PRUE', 'PRUEBA3', null, null, null, null, '00003 ')
+
+insert into Item_Factura values 
+--('P', 'PRUE', 'PRUEBA3', '00000000', 2, null),
+--('P', 'PRUE', 'PRUEBA3', '00000001', 1, null),
+--('P', 'PRUE', 'PRUEBA3', '00000002', 5, null),
+('P', 'PRUE', 'PRUEBA4', '00000003', 21, null),
+('P', 'PRUE', 'PRUEBA4', '00000004', 1, null),
+('P', 'PRUE', 'PRUEBA4', '00000005', 5, null)*/
